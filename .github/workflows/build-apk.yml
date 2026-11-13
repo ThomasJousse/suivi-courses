@@ -1,0 +1,56 @@
+# Compile l'APK signé et le publie dans les Releases quand la version de package.json change sur main
+name: Release APK
+on:
+  push:
+    branches: [main]
+    paths: ["package.json"]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      ok: ${{ steps.c.outputs.ok }}
+    steps:
+      - id: c
+        env:
+          APP_SECRETS: ${{ secrets.APP_SECRETS }}
+        run: |
+          if [ -n "$APP_SECRETS" ]; then echo "ok=true" >> $GITHUB_OUTPUT; else echo "::warning::Secret APP_SECRETS absent : compilation ignorée"; echo "ok=false" >> $GITHUB_OUTPUT; fi
+  build:
+    needs: check
+    if: needs.check.outputs.ok == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with: { node-version: 22 }
+      - uses: actions/setup-java@v5
+        with: { distribution: temurin, java-version: 21 }
+      - name: SDK Android (platform 34, build-tools 35)
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;35.0.0" > /dev/null
+      - name: Version
+        run: echo "APP_VERSION=$(node -p "require('./package.json').version")" >> $GITHUB_ENV
+      - name: Secrets (un seul secret JSON APP_SECRETS)
+        env:
+          APP_SECRETS: ${{ secrets.APP_SECRETS }}
+        run: |
+          node -e '
+            const s=JSON.parse(process.env.APP_SECRETS), fs=require("fs");
+            fs.writeFileSync(process.env.RUNNER_TEMP+"/release.jks", Buffer.from(s.keystore,"base64"));
+            fs.appendFileSync(process.env.GITHUB_ENV, ["COURSES_API_URL="+s.api,"COURSES_API_KEY="+s.key,"KEYSTORE_PASSWORD="+s.kspass].join("\n")+"\n");
+            for (const v of [s.key,s.kspass]) console.log("::add-mask::"+v);
+          '
+      - run: node scripts/build.mjs
+      - name: Compilation
+        env:
+          KEYSTORE_FILE: ${{ runner.temp }}/release.jks
+        run: ./build.sh
+      - name: Publier la Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.APP_VERSION }}
+          name: Version ${{ env.APP_VERSION }}
+          files: build/suivi-courses-v*.apk
+          make_latest: true
